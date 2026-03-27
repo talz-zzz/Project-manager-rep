@@ -1,0 +1,914 @@
+import React, { useEffect, useMemo, useState } from "react";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
+import { ArrowLeft, ClipboardList, Home as HomeIcon, StickyNote, Wand2 } from "lucide-react";
+
+const STORAGE_KEY = "taskflow-suite-v4";
+
+const priorityOptions = ["Low", "Medium", "High"] as const;
+const statusOptions = ["Open", "In Progress", "Done"] as const;
+
+type Priority = (typeof priorityOptions)[number];
+type Status = (typeof statusOptions)[number];
+
+type Task = {
+  id: string;
+  task: string;
+  owner: string;
+  priority: Priority;
+  due_date: string;
+  status: Status;
+  source: "meeting" | "manual";
+  created_at: string;
+  meetingId?: string;
+  meetingProjectName?: string;
+  meetingDate?: string;
+};
+
+type MeetingTaskCandidate = {
+  id: string;
+  text: string;
+  selected: boolean;
+  owner: string;
+  priority: Priority;
+  due_date: string;
+};
+
+type MeetingRecord = {
+  id: string;
+  meetingDate: string;
+  projectName: string;
+  notes: string;
+  created_at: string;
+  tasks: Task[];
+};
+
+type StoredState = {
+  tasks: Task[];
+  meetings: MeetingRecord[];
+};
+
+function loadState(): StoredState {
+  if (typeof window === "undefined") {
+    return { tasks: [], meetings: [] };
+  }
+
+  const raw = window.localStorage.getItem(STORAGE_KEY);
+  if (!raw) return { tasks: [], meetings: [] };
+
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      tasks: Array.isArray(parsed?.tasks) ? parsed.tasks : [],
+      meetings: Array.isArray(parsed?.meetings) ? parsed.meetings : [],
+    };
+  } catch {
+    return { tasks: [], meetings: [] };
+  }
+}
+
+function priorityBadge(priority: Priority) {
+  if (priority === "High") return "destructive" as const;
+  if (priority === "Medium") return "secondary" as const;
+  return "outline" as const;
+}
+
+function extractTaskCandidates(notes: string): MeetingTaskCandidate[] {
+  const lines = notes
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const candidates = lines
+    .map((line) => {
+      const cleaned = line
+        .replace(/^[-*•]\s*/, "")
+        .replace(/^\d+[.)]\s*/, "")
+        .replace(/^(todo|action item|action|follow-up|next step)[:\-]?\s*/i, "")
+        .trim();
+
+      const looksActionable =
+        /^[-*•]/.test(line) ||
+        /^\d+[.)]/.test(line) ||
+        /^(todo|action item|action|follow-up|next step)[:\-]?/i.test(line) ||
+        /\b(send|update|review|prepare|create|share|finalize|follow up|schedule|align|confirm|build|draft|check)\b/i.test(cleaned);
+
+      if (!looksActionable || cleaned.length < 4) return null;
+
+      return {
+        id: crypto.randomUUID(),
+        text: cleaned,
+        selected: true,
+        owner: "",
+        priority: "Medium" as Priority,
+        due_date: "",
+      };
+    })
+    .filter(Boolean) as MeetingTaskCandidate[];
+
+  const unique: MeetingTaskCandidate[] = [];
+  const seen = new Set<string>();
+
+  for (const item of candidates) {
+    const key = item.text.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(item);
+    }
+  }
+
+  return unique;
+}
+
+function HomePage({
+  onNavigate,
+  taskCount,
+  meetingCount,
+}: {
+  onNavigate: (page: "home" | "taskflow" | "meetings") => void;
+  taskCount: number;
+  meetingCount: number;
+}) {
+  return (
+    <div className="grid gap-6 md:grid-cols-2">
+      <Card className="rounded-3xl shadow-sm">
+        <CardHeader className="space-y-3">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100">
+            <ClipboardList className="h-6 w-6" />
+          </div>
+          <div>
+            <CardTitle className="text-2xl">TaskFlow</CardTitle>
+            <CardDescription className="pt-2 text-sm leading-6">
+              Track all tasks in one place, including tasks created from meetings.
+            </CardDescription>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="text-sm text-slate-600">Current tasks: {taskCount}</div>
+          <Button className="rounded-xl" onClick={() => onNavigate("taskflow")}>
+            Open TaskFlow
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card className="rounded-3xl shadow-sm">
+        <CardHeader className="space-y-3">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100">
+            <StickyNote className="h-6 w-6" />
+          </div>
+          <div>
+            <CardTitle className="text-2xl">Meeting Notes</CardTitle>
+            <CardDescription className="pt-2 text-sm leading-6">
+              Add meeting notes, generate a task list from them, and push those tasks into TaskFlow automatically.
+            </CardDescription>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="text-sm text-slate-600">Saved meetings: {meetingCount}</div>
+          <Button className="rounded-xl" variant="outline" onClick={() => onNavigate("meetings")}>
+            Open Meeting Notes
+          </Button>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function TaskFlowPage({
+  tasks,
+  onBack,
+  onUpdateStatus,
+  onClearAll,
+  onAddTask,
+  onOpenMeeting,
+}: {
+  tasks: Task[];
+  onBack: () => void;
+  onUpdateStatus: (id: string, status: Status) => void;
+  onClearAll: () => void;
+  onAddTask: (task: { task: string; owner: string; priority: Priority; due_date: string }) => void;
+  onOpenMeeting: (meetingId: string) => void;
+}) {
+  const [filterOwner, setFilterOwner] = useState("all");
+  const [filterStatus, setFilterStatus] = useState("all");
+  const [form, setForm] = useState({
+    task: "",
+    owner: "",
+    priority: "Medium" as Priority,
+    due_date: "",
+  });
+
+  const owners = useMemo(() => {
+    const vals = [...new Set(tasks.map((t) => t.owner).filter(Boolean))];
+    return vals.sort((a, b) => a.localeCompare(b));
+  }, [tasks]);
+
+  const filteredTasks = useMemo(() => {
+    return tasks.filter((task) => {
+      const ownerMatch = filterOwner === "all" || task.owner === filterOwner;
+      const statusMatch = filterStatus === "all" || task.status === filterStatus;
+      return ownerMatch && statusMatch;
+    });
+  }, [tasks, filterOwner, filterStatus]);
+
+  const report = useMemo(() => {
+    const open = tasks.filter((t) => t.status === "Open").length;
+    const inProgress = tasks.filter((t) => t.status === "In Progress").length;
+    const done = tasks.filter((t) => t.status === "Done").length;
+    const highPriorityActive = tasks.filter(
+      (t) => t.priority === "High" && t.status !== "Done"
+    );
+
+    return {
+      total: tasks.length,
+      open,
+      inProgress,
+      done,
+      highPriorityActive,
+    };
+  }, [tasks]);
+
+  const handleAddTask = () => {
+    if (!form.task.trim()) return;
+
+    onAddTask({
+      task: form.task.trim(),
+      owner: form.owner.trim(),
+      priority: form.priority,
+      due_date: form.due_date,
+    });
+
+    setForm({
+      task: "",
+      owner: "",
+      priority: "Medium",
+      due_date: "",
+    });
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">TaskFlow</h2>
+          <p className="text-sm text-slate-600">A shared task view fed by meeting-generated follow-ups.</p>
+        </div>
+        <Button variant="outline" className="rounded-xl" onClick={onBack}>
+          <ArrowLeft className="mr-2 h-4 w-4" /> Back Home
+        </Button>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-4">
+        <Card className="rounded-2xl shadow-sm">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-slate-500">Total Tasks</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-3xl font-semibold">{report.total}</div>
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-2xl shadow-sm">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-slate-500">Open</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-3xl font-semibold">{report.open}</div>
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-2xl shadow-sm">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-slate-500">In Progress</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-3xl font-semibold">{report.inProgress}</div>
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-2xl shadow-sm">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium text-slate-500">Done</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-3xl font-semibold">{report.done}</div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-[1.4fr_0.9fr]">
+        <div className="space-y-6">
+          <Card className="rounded-3xl shadow-sm">
+            <CardHeader>
+              <CardTitle>Add Task Manually</CardTitle>
+              <CardDescription>Use this when you want to open a task directly, without going through Meeting Notes.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2 md:col-span-2">
+                <Label>Task</Label>
+                <Input
+                  value={form.task}
+                  onChange={(e) => setForm((prev) => ({ ...prev, task: e.target.value }))}
+                  placeholder="Create launch status update"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Owner</Label>
+                <Input
+                  value={form.owner}
+                  onChange={(e) => setForm((prev) => ({ ...prev, owner: e.target.value }))}
+                  placeholder="Tal"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Priority</Label>
+                <Select
+                  value={form.priority}
+                  onValueChange={(value: Priority) => setForm((prev) => ({ ...prev, priority: value }))}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {priorityOptions.map((priority) => (
+                      <SelectItem key={priority} value={priority}>
+                        {priority}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2 md:max-w-xs">
+                <Label>Due date</Label>
+                <Input
+                  type="date"
+                  value={form.due_date}
+                  onChange={(e) => setForm((prev) => ({ ...prev, due_date: e.target.value }))}
+                />
+              </div>
+              <div className="md:col-span-2">
+                <Button className="rounded-xl" onClick={handleAddTask}>Add task</Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="rounded-3xl shadow-sm">
+            <CardHeader>
+              <CardTitle>Task List</CardTitle>
+              <CardDescription>Tasks generated from Meeting Notes and tracked here in one place.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>Filter by owner</Label>
+                  <Select value={filterOwner} onValueChange={setFilterOwner}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="All owners" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All owners</SelectItem>
+                      {owners.map((owner) => (
+                        <SelectItem key={owner} value={owner}>
+                          {owner}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Filter by status</Label>
+                  <Select value={filterStatus} onValueChange={setFilterStatus}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="All statuses" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All statuses</SelectItem>
+                      {statusOptions.map((status) => (
+                        <SelectItem key={status} value={status}>
+                          {status}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                {filteredTasks.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed p-8 text-center text-sm text-slate-500">
+                    No tasks yet. Generate them from Meeting Notes or add one manually.
+                  </div>
+                ) : (
+                  filteredTasks.map((task) => (
+                    <div key={task.id} className="rounded-2xl border bg-white p-4 shadow-sm">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div className="space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="font-medium text-slate-900">{task.task}</h3>
+                            <Badge variant={priorityBadge(task.priority)}>{task.priority}</Badge>
+                            <Badge variant="outline">{task.status}</Badge>
+                            {task.source === "meeting" && (
+                              <Badge variant="secondary">From Meeting Notes</Badge>
+                            )}
+                            {task.source === "manual" && (
+                              <Badge variant="outline">Manual</Badge>
+                            )}
+                          </div>
+                          <div className="space-y-1 text-sm text-slate-600">
+                            <div>Owner: {task.owner || "—"} · Due: {task.due_date || "—"}</div>
+                            {task.source === "meeting" && task.meetingId && (
+                              <button
+                                className="text-left text-slate-500 underline"
+                                onClick={() => onOpenMeeting(task.meetingId as string)}
+                              >
+                                From: {task.meetingProjectName || "Meeting"}
+                                {task.meetingDate ? ` · ${task.meetingDate}` : ""}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          <Button variant="outline" size="sm" onClick={() => onUpdateStatus(task.id, "Open")}>
+                            Open
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => onUpdateStatus(task.id, "In Progress")}
+                          >
+                            In Progress
+                          </Button>
+                          <Button variant="outline" size="sm" onClick={() => onUpdateStatus(task.id, "Done")}>
+                            Done
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              {tasks.length > 0 && (
+                <div className="flex justify-end">
+                  <Button variant="ghost" onClick={onClearAll}>
+                    Clear all tasks
+                  </Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+
+        <Card className="rounded-3xl shadow-sm">
+          <CardHeader>
+            <CardTitle>Weekly PM Report</CardTitle>
+            <CardDescription>Quick summary of execution status.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3">
+              <div className="rounded-2xl border p-4">
+                <div className="text-sm text-slate-500">Open tasks</div>
+                <div className="mt-1 text-2xl font-semibold">{report.open}</div>
+              </div>
+              <div className="rounded-2xl border p-4">
+                <div className="text-sm text-slate-500">In Progress</div>
+                <div className="mt-1 text-2xl font-semibold">{report.inProgress}</div>
+              </div>
+              <div className="rounded-2xl border p-4">
+                <div className="text-sm text-slate-500">Completed</div>
+                <div className="mt-1 text-2xl font-semibold">{report.done}</div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border p-4">
+              <div className="mb-3 text-sm font-medium text-slate-700">High-priority active tasks</div>
+              {report.highPriorityActive.length > 0 ? (
+                <div className="space-y-2">
+                  {report.highPriorityActive.map((task) => (
+                    <div key={task.id} className="rounded-xl bg-slate-50 p-3 text-sm">
+                      <span className="font-medium">{task.task}</span>
+                      <span className="text-slate-500"> · {task.owner || "No owner"} · Due {task.due_date || "—"}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-sm text-slate-500">No active high-priority tasks.</div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+function MeetingNotesPage({
+  meetings,
+  onBack,
+  onSaveMeeting,
+  expandedMeetingIds,
+  onToggleMeeting,
+}: {
+  meetings: MeetingRecord[];
+  onBack: () => void;
+  onSaveMeeting: (data: {
+    meetingDate: string;
+    projectName: string;
+    notes: string;
+    tasks: Array<{ task: string; owner: string; priority: Priority; due_date: string }>;
+  }) => void;
+  expandedMeetingIds: Record<string, boolean>;
+  onToggleMeeting: (meetingId: string, open?: boolean) => void;
+}) {
+  const [form, setForm] = useState({
+    meetingDate: "",
+    projectName: "",
+    notes: "",
+  });
+
+  const [candidates, setCandidates] = useState<MeetingTaskCandidate[]>([]);
+
+  const generateTasks = () => {
+    const extracted = extractTaskCandidates(form.notes);
+    setCandidates(extracted);
+  };
+
+  const updateCandidate = (id: string, field: keyof MeetingTaskCandidate, value: string | boolean) => {
+    setCandidates((prev) =>
+      prev.map((task) => (task.id === id ? { ...task, [field]: value } : task))
+    );
+  };
+
+  const handleSubmit = () => {
+    if (!form.meetingDate || !form.projectName.trim() || !form.notes.trim()) return;
+
+    onSaveMeeting({
+      meetingDate: form.meetingDate,
+      projectName: form.projectName.trim(),
+      notes: form.notes.trim(),
+      tasks: candidates
+        .filter((task) => task.selected)
+        .map((task) => ({
+          task: task.text,
+          owner: task.owner,
+          priority: task.priority,
+          due_date: task.due_date,
+        })),
+    });
+
+    setForm({
+      meetingDate: form.meetingDate,
+      projectName: "",
+      notes: "",
+    });
+    setCandidates([]);
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Meeting Notes</h2>
+          <p className="text-sm text-slate-600">
+            Write meeting notes, generate action items, and push them into TaskFlow.
+          </p>
+        </div>
+        <Button variant="outline" className="rounded-xl" onClick={onBack}>
+          <ArrowLeft className="mr-2 h-4 w-4" /> Back Home
+        </Button>
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-[1fr_1.1fr]">
+        <Card className="rounded-3xl shadow-sm">
+          <CardHeader>
+            <CardTitle>New Meeting Entry</CardTitle>
+            <CardDescription>
+              Use bullet points or action-style lines to help the app generate tasks.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label>Meeting date</Label>
+              <Input
+                type="date"
+                value={form.meetingDate}
+                onChange={(e) => setForm((prev) => ({ ...prev, meetingDate: e.target.value }))}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Project name</Label>
+              <Input
+                value={form.projectName}
+                onChange={(e) => setForm((prev) => ({ ...prev, projectName: e.target.value }))}
+                placeholder="Q2 Launch"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Notes</Label>
+              <Textarea
+                value={form.notes}
+                onChange={(e) => setForm((prev) => ({ ...prev, notes: e.target.value }))}
+                placeholder={`Example:\n- Send revised timeline to design\n- Review landing page copy\nAction: schedule follow-up with sales`}
+                className="min-h-40"
+              />
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="outline" className="rounded-xl" onClick={generateTasks}>
+                <Wand2 className="mr-2 h-4 w-4" /> Generate tasks from notes
+              </Button>
+              <Button className="rounded-xl" onClick={handleSubmit}>
+                Save meeting + selected tasks
+              </Button>
+            </div>
+
+            <div className="rounded-2xl border p-4">
+              <div className="mb-3 text-sm font-medium text-slate-700">Generated task candidates</div>
+              {candidates.length === 0 ? (
+                <div className="text-sm text-slate-500">
+                  No tasks generated yet. Use notes with bullets, numbered items, or action-style lines.
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {candidates.map((task) => (
+                    <div key={task.id} className="rounded-2xl border p-4">
+                      <div className="flex items-start gap-3">
+                        <Checkbox
+                          checked={task.selected}
+                          onCheckedChange={(checked) => updateCandidate(task.id, "selected", Boolean(checked))}
+                        />
+                        <div className="flex-1 space-y-3">
+                          <Input
+                            value={task.text}
+                            onChange={(e) => updateCandidate(task.id, "text", e.target.value)}
+                          />
+                          <div className="grid gap-3 md:grid-cols-3">
+                            <Input
+                              value={task.owner}
+                              onChange={(e) => updateCandidate(task.id, "owner", e.target.value)}
+                              placeholder="Owner"
+                            />
+                            <Select
+                              value={task.priority}
+                              onValueChange={(value: Priority) => updateCandidate(task.id, "priority", value)}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {priorityOptions.map((priority) => (
+                                  <SelectItem key={priority} value={priority}>
+                                    {priority}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <Input
+                              type="date"
+                              value={task.due_date}
+                              onChange={(e) => updateCandidate(task.id, "due_date", e.target.value)}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-3xl shadow-sm">
+          <CardHeader>
+            <CardTitle>Saved Meetings</CardTitle>
+            <CardDescription>Each meeting keeps its notes and the tasks created from it.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {meetings.length === 0 ? (
+              <div className="rounded-2xl border border-dashed p-8 text-center text-sm text-slate-500">
+                No meeting notes yet.
+              </div>
+            ) : (
+              meetings.map((meeting) => {
+                const isOpen = expandedMeetingIds[meeting.id] ?? false;
+
+                return (
+                  <div
+                    id={`meeting-${meeting.id}`}
+                    key={meeting.id}
+                    className="rounded-2xl border p-4 shadow-sm"
+                  >
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <div className="font-medium text-slate-900">{meeting.projectName}</div>
+                        <Badge variant="outline">{meeting.meetingDate}</Badge>
+                      </div>
+                      <Button size="sm" variant="ghost" onClick={() => onToggleMeeting(meeting.id)}>
+                        {isOpen ? "Collapse" : "Expand"}
+                      </Button>
+                    </div>
+
+                    {!isOpen && (
+                      <p className="line-clamp-2 text-sm text-slate-500">{meeting.notes}</p>
+                    )}
+
+                    {isOpen && (
+                      <>
+                        <p className="whitespace-pre-wrap text-sm leading-6 text-slate-700">
+                          {meeting.notes}
+                        </p>
+
+                        <div className="mt-4 rounded-xl bg-slate-50 p-3 text-sm">
+                          <div className="font-medium text-slate-900">Generated tasks</div>
+                          {meeting.tasks?.length ? (
+                            <div className="mt-2 space-y-2">
+                              {meeting.tasks.map((task) => (
+                                <div key={task.id} className="text-slate-600">
+                                  • {task.task}
+                                  {task.owner ? ` · ${task.owner}` : ""}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="mt-1 text-slate-500">No tasks were saved from this meeting.</div>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
+export default function TaskFlowWebApp() {
+  const [page, setPage] = useState<"home" | "taskflow" | "meetings">("home");
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [meetings, setMeetings] = useState<MeetingRecord[]>([]);
+  const [expandedMeetingIds, setExpandedMeetingIds] = useState<Record<string, boolean>>({});
+  const [pendingMeetingScrollId, setPendingMeetingScrollId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const initial = loadState();
+    setTasks(initial.tasks || []);
+    setMeetings(initial.meetings || []);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks, meetings }));
+    }
+  }, [tasks, meetings]);
+
+  useEffect(() => {
+    if (page === "meetings" && pendingMeetingScrollId) {
+      const timer = window.setTimeout(() => {
+        const el = document.getElementById(`meeting-${pendingMeetingScrollId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+        setPendingMeetingScrollId(null);
+      }, 100);
+
+      return () => window.clearTimeout(timer);
+    }
+  }, [page, pendingMeetingScrollId, meetings]);
+
+  const handleUpdateStatus = (id: string, status: Status) => {
+    setTasks((prev) => prev.map((task) => (task.id === id ? { ...task, status } : task)));
+  };
+
+  const handleClearAllTasks = () => setTasks([]);
+
+  const handleAddManualTask = (taskInput: {
+    task: string;
+    owner: string;
+    priority: Priority;
+    due_date: string;
+  }) => {
+    const newTask: Task = {
+      id: crypto.randomUUID(),
+      task: taskInput.task,
+      owner: taskInput.owner,
+      priority: taskInput.priority,
+      due_date: taskInput.due_date,
+      status: "Open",
+      source: "manual",
+      created_at: new Date().toISOString(),
+    };
+
+    setTasks((prev) => [newTask, ...prev]);
+  };
+
+  const handleOpenMeeting = (meetingId: string) => {
+    setExpandedMeetingIds((prev) => ({ ...prev, [meetingId]: true }));
+    setPendingMeetingScrollId(meetingId);
+    setPage("meetings");
+  };
+
+  const handleToggleMeeting = (meetingId: string, open?: boolean) => {
+    setExpandedMeetingIds((prev) => ({
+      ...prev,
+      [meetingId]: open ?? !prev[meetingId],
+    }));
+  };
+
+  const handleSaveMeeting = (meetingInput: {
+    meetingDate: string;
+    projectName: string;
+    notes: string;
+    tasks: Array<{ task: string; owner: string; priority: Priority; due_date: string }>;
+  }) => {
+    const meetingId = crypto.randomUUID();
+
+    const linkedTasks: Task[] = (meetingInput.tasks || []).map((task) => ({
+      id: crypto.randomUUID(),
+      task: task.task,
+      owner: task.owner,
+      priority: task.priority,
+      due_date: task.due_date,
+      status: "Open",
+      source: "meeting",
+      meetingId,
+      meetingProjectName: meetingInput.projectName,
+      meetingDate: meetingInput.meetingDate,
+      created_at: new Date().toISOString(),
+    }));
+
+    const meetingRecord: MeetingRecord = {
+      id: meetingId,
+      meetingDate: meetingInput.meetingDate,
+      projectName: meetingInput.projectName,
+      notes: meetingInput.notes,
+      created_at: new Date().toISOString(),
+      tasks: linkedTasks,
+    };
+
+    if (linkedTasks.length) {
+      setTasks((prev) => [...linkedTasks, ...prev]);
+    }
+
+    setMeetings((prev) => [meetingRecord, ...prev]);
+    setExpandedMeetingIds((prev) => ({ ...prev, [meetingId]: false }));
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-6 md:p-10">
+      <div className="mx-auto max-w-6xl space-y-6">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-sm text-slate-500">
+              <HomeIcon className="h-4 w-4" /> PM Tools Suite
+            </div>
+            <h1 className="text-3xl font-semibold tracking-tight">TaskFlow + Meeting Notes</h1>
+            <p className="max-w-3xl text-sm leading-6 text-slate-600">
+              A lightweight productivity suite with a homepage, a task tracker, and a meeting notes page.
+              Meeting notes can generate candidate tasks that flow into TaskFlow.
+            </p>
+          </div>
+        </div>
+
+        {page === "home" && (
+          <HomePage onNavigate={setPage} taskCount={tasks.length} meetingCount={meetings.length} />
+        )}
+
+        {page === "taskflow" && (
+          <TaskFlowPage
+            tasks={tasks}
+            onBack={() => setPage("home")}
+            onUpdateStatus={handleUpdateStatus}
+            onClearAll={handleClearAllTasks}
+            onAddTask={handleAddManualTask}
+            onOpenMeeting={handleOpenMeeting}
+          />
+        )}
+
+        {page === "meetings" && (
+          <MeetingNotesPage
+            meetings={meetings}
+            onBack={() => setPage("home")}
+            onSaveMeeting={handleSaveMeeting}
+            expandedMeetingIds={expandedMeetingIds}
+            onToggleMeeting={handleToggleMeeting}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
